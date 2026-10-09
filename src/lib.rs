@@ -5,6 +5,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, E
 #[contracttype]
 pub enum DataKey {
     Admin,
+    EmergencyGuardian,
+    GuardianPaused,
     Agent(Address),
     RiskThreshold,
     LatestFlag(Address),
@@ -22,6 +24,8 @@ pub struct FlagRecord {
 }
 
 const FLAG_EVENT: Symbol = symbol_short!("flagged");
+const GUARDIAN_PAUSE_EVENT: Symbol = symbol_short!("gpause");
+const GUARDIAN_RESUME_EVENT: Symbol = symbol_short!("gunpause");
 const MAX_SCORE: u32 = 100;
 const INSTANCE_TTL_THRESHOLD: u32 = 10_000;
 const INSTANCE_TTL_BUMP: u32 = 100_000;
@@ -45,10 +49,75 @@ impl StellarSentinel {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
+            .set(&DataKey::GuardianPaused, &false);
+        env.storage()
+            .instance()
             .set(&DataKey::RiskThreshold, &default_threshold);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+    }
+
+    /// Admin-only: assign the address with pause-only emergency authority.
+    pub fn set_emergency_guardian(env: Env, admin: Address, guardian: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyGuardian, &guardian);
+        bump_instance_ttl(&env);
+    }
+
+    /// Guardian-only: stop new flag submissions without gaining admin rights.
+    pub fn guardian_pause(env: Env, guardian: Address) {
+        guardian.require_auth();
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyGuardian)
+            .expect("emergency guardian is not configured");
+        if configured != guardian {
+            panic!("not emergency guardian");
+        }
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::GuardianPaused)
+            .unwrap_or(false);
+        if !paused {
+            env.storage()
+                .instance()
+                .set(&DataKey::GuardianPaused, &true);
+            env.events().publish((GUARDIAN_PAUSE_EVENT, guardian), true);
+        }
+        bump_instance_ttl(&env);
+    }
+
+    /// Admin-only recovery: resume after an emergency guardian pause.
+    pub fn resume_from_guardian_pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::GuardianPaused)
+            .unwrap_or(false);
+        if !paused {
+            bump_instance_ttl(&env);
+            return;
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::GuardianPaused, &false);
+        env.events().publish((GUARDIAN_RESUME_EVENT, admin), false);
+        bump_instance_ttl(&env);
+    }
+
+    pub fn is_guardian_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::GuardianPaused)
+            .unwrap_or(false)
     }
 
     /// Admin-only: authorize an address to act as a monitoring agent.
@@ -96,6 +165,14 @@ impl StellarSentinel {
     /// anomalous. Scores below the configured threshold are rejected. Emits
     /// the stable `flagged` event and records the latest flag for the subject.
     pub fn flag_anomaly(env: Env, agent: Address, subject: Address, score: u32) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::GuardianPaused)
+            .unwrap_or(false)
+        {
+            panic!("emergency guardian paused contract");
+        }
         agent.require_auth();
         let is_agent: bool = env
             .storage()
