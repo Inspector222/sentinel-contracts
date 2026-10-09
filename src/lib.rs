@@ -7,6 +7,7 @@ pub enum DataKey {
     Admin,
     Agent(Address),
     RiskThreshold,
+    Paused,
     LatestFlag(Address),
     // Append registry storage to preserve existing storage-key encoding.
     AgentRegistry,
@@ -65,6 +66,7 @@ impl StellarSentinel {
         env.storage()
             .instance()
             .set(&DataKey::RiskThreshold, &default_threshold);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
@@ -192,6 +194,30 @@ impl StellarSentinel {
         bump_instance_ttl(&env);
     }
 
+    /// Admin-only: stop agent flag submissions.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        bump_instance_ttl(&env);
+    }
+
+    /// Admin-only: resume agent flag submissions.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        bump_instance_ttl(&env);
+    }
+
+    /// Report whether new flag submissions are currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     pub fn is_agent(env: Env, agent: Address) -> bool {
         let authorized = env.storage()
             .instance()
@@ -208,10 +234,14 @@ impl StellarSentinel {
         if env
             .storage()
             .instance()
-            .get(&DataKey::GuardianPaused)
+            .get::<_, bool>(&DataKey::Paused)
             .unwrap_or(false)
         {
+            panic!("contract is paused");
+        }
+        if env.storage().instance().get::<_, bool>(&DataKey::GuardianPaused).unwrap_or(false) {
             panic!("emergency guardian paused contract");
+        }
         }
         agent.require_auth();
         let is_agent: bool = env
