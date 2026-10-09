@@ -86,10 +86,12 @@ impl StellarSentinel {
     }
 
     pub fn is_agent(env: Env, agent: Address) -> bool {
-        env.storage()
+        let authorized = env.storage()
             .instance()
             .get(&DataKey::Agent(agent))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        bump_instance_ttl(&env);
+        authorized
     }
 
     /// Called by an authorized agent when it flags a transaction/address as
